@@ -1,0 +1,97 @@
+* {
+  padding: 0;
+  margin: 0;
+}
+
+QMenu {
+  background-color: white;
+  border: 1px solid #e4e4e7;
+  padding: 4px;
+}
+
+QMenu::item {
+  padding: 6px 20px;
+  border-radius: 4px;
+}
+
+QMenu::item:selected {
+  background-color: #e4e4e7;
+  color: black;
+}
+
+QMenu::separator {
+  height: 1px;
+  background: #e4e4e7;
+  margin: 4px 8px;
+}
+
+QPushButton {
+  background-color: #fbcfe8;
+  padding: 5px 10px;
+  border-radius: 4px;
+}
+
+QPushButton:hover {
+  background-color: #f9a8d4;
+}
+
+QPushButton:pressed {
+  background-color: #f472b6;
+}
+
+QLineEdit, QTextEdit {
+  border: 1px solid #d4d4d8;
+  border-radius: 4px;
+  padding: 4px;
+  background: white;
+}
+
+QLineEdit:focus, QTextEdit:focus {
+  border: 1px solid #f472b6;
+}
+
+QListView#agentList {
+  outline: none;
+  background-color: #f4f4f5;
+}
+
+QListView#agentList::item {
+  padding: 6px 12px;
+}
+
+QListView#agentList::item:hover {
+  background-color: white;
+}
+
+QListView#agentList::item:selected {
+  background-color: #e4e4e7;
+  color: black;
+  border-left: 3px solid #f472b6;
+}
+
+#agentEditor {
+  background: white;
+  border: 1px solid #e4e4e7;
+  border-radius: 6px;
+}
+
+QListView#messageList {
+  outline: none;
+  background-color: #e4e4e7;
+}
+
+QTextEdit#inputArea {
+  background-color: white;
+  padding: 6px;
+  border-top: 1px solid #e4e4e7;
+}
+
+QSplitter::handle {
+  width: 4px;
+  background-color: transparent;
+}
+
+QSplitter::handle:hover {
+  background-color: #e4e4e7;
+}
+
