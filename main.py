@@ -3,16 +3,23 @@ import sys
 from typing import cast
 
 import requests
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QIcon, QResizeEvent
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
+    QListView,
+    QListWidget,
+    QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
     QPushButton,
+    QSplitter,
+    QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -61,102 +68,118 @@ def translate_text(text, source_lang, target_lang):
         return {"error": f"网络请求失败: {str(e)}"}
 
 
-class TranslateWindow(QWidget):
-    """翻译结果弹出窗口（半透明、自动关闭）"""
+class TranslateWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
-        # self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setMinimumSize(450, 200)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
 
-        # 原文
-        self.src_label = QLabel("原文")
-        self.src_label.setStyleSheet("color: #333; font-size: 14px;")
-        self.src_label.setWordWrap(True)
-        layout.addWidget(self.src_label)
+        self.src = QPlainTextEdit()
+        self.src.setPlaceholderText("待翻译文本...")
+        layout.addWidget(self.src)
 
-        # 分隔线
-        line = QLabel()
-        line.setStyleSheet("border: 1px solid #ccc;")
-        layout.addWidget(line)
+        self.dst = QPlainTextEdit()
+        self.dst.setPlaceholderText("翻译结果...")
+        self.dst.setReadOnly(True)
+        layout.addWidget(self.dst)
 
-        # 译文
-        self.dst_label = QLabel("译文")
-        self.dst_label.setStyleSheet("color: #1a73e8; font-size: 16px; font-weight: bold;")
-        self.dst_label.setWordWrap(True)
-        layout.addWidget(self.dst_label)
+    def set_translation(self, src: str | None = None, dst: str | None = None):
+        if src:
+            self.src.setPlainText(src)
+        if dst:
+            self.dst.setPlainText(dst)
 
-        # 底部按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        self.close_btn = QPushButton("关闭 (5s)")
-        self.close_btn.setFixedWidth(100)
-        self.close_btn.clicked.connect(self.close)
-        btn_layout.addWidget(self.close_btn)
-        layout.addLayout(btn_layout)
 
-        # 背景样式
-        self.setStyleSheet(
-            """
-            QWidget#window {
-                background: rgba(255, 255, 255, 240);
-                border-radius: 10px;
-                border: 1px solid #aaa;
-            }
-        """
+class MainWindow(QMainWindow):
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Helper")
+        self.setWindowFlags(
+            # Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint
         )
-        self.setObjectName("window")
+        self.resize(400, 700)
 
-        # 自动关闭定时器
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.close)
-        self.timer.setSingleShot(True)
-        self.auto_close_seconds = 5
+        central = QWidget()
+        self.setCentralWidget(central)
+        self.root_layout = QVBoxLayout(central)
+        self.root_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 居中
-        self.center()
+        self.nav = QListWidget()
+        self.nav.setObjectName("nav")
+        self.nav.addItems(["翻译", "设置"])
+        self.nav.setFlow(QListView.Flow.LeftToRight)
 
-    def center(self):
-        screen = QApplication.primaryScreen().availableGeometry()
-        self.move(
-            int((screen.width() - self.width()) / 2), int((screen.height() - self.height()) / 2)
-        )
+        self.stack = QStackedWidget()
+        self.translate_widget = TranslateWidget(self)
+        self.stack.addWidget(self.translate_widget)
+        self.settings_widget = QLabel("settings page")
+        self.stack.addWidget(self.settings_widget)
 
-    def show_translation(self, src, dst):
-        self.src_label.setText(f"📖 {src}")
-        self.dst_label.setText(f"📝 {dst}")
-        self.close_btn.setText(f"关闭 ({self.auto_close_seconds}s)")
-        self.timer.start(self.auto_close_seconds * 1000)
+        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+
+        self._apply_layout(self.size())
+
+        self.nav.setCurrentRow(0)
+
+    def show_page(self, page="translate"):
+        print(f"show page {page}")
+        self.nav.setCurrentRow(0)
         self.show()
-        self.raise_()
-        self.activateWindow()
 
-    def closeEvent(self, event):
-        self.timer.stop()
-        event.accept()
+    def resizeEvent(self, event: QResizeEvent, /):
+        super().resizeEvent(event)
+        old_size = event.oldSize()
+        new_size = event.size()
+        if (old_size.width() > old_size.height()) != (new_size.width() > new_size.height()):
+            self._apply_layout(new_size)
+
+    def _apply_layout(self, size: QSize):
+        width, height = size.width(), size.height()
+
+        old_layout = self.root_layout
+        while old_layout.count():
+            old_layout.takeAt(0)
+
+        if width < height:
+            self.nav.setFlow(QListView.Flow.LeftToRight)
+            self.nav.setFixedWidth(16777215)
+            self.nav.setFixedHeight(50)
+            self.root_layout.addWidget(self.nav)
+            self.root_layout.addWidget(self.stack)
+        else:
+            self.nav.setFlow(QListView.Flow.TopToBottom)
+            self.nav.setFixedHeight(16777215)
+            self.nav.setFixedWidth(100)
+            for i in range(self.nav.count()):
+                item = self.nav.item(i)
+                if item:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            splitter = QSplitter()
+            splitter.addWidget(self.nav)
+            splitter.addWidget(self.stack)
+            self.root_layout.addWidget(splitter)
 
 
-class TranslateAdapter(QDBusAbstractAdaptor):
+class WindowAdapter(QDBusAbstractAdaptor):
     def __init__(self, parent):
         super().__init__(parent)
 
     @Slot(str)
+    def Activate(self, page):
+        parent = cast("MyApp", self.parent())
+        parent.handle_activate(page)
+
+    @Slot(str)
     def Translate(self, text):
-        parent = cast("TranslatorApp", self.parent())
+        parent = cast("MyApp", self.parent())
         if text and text.strip():
-            parent.handle_translation_request(text.strip())
+            parent.handle_translation(text.strip())
 
 
-class TranslatorApp(QApplication):
+class MyApp(QApplication):
 
     translation_requested = Signal(str, str)
 
@@ -173,33 +196,39 @@ class TranslatorApp(QApplication):
         self.tray.setContextMenu(tray_menu)
         self.tray.show()
 
-        self.window = TranslateWindow()
+        self.window = MainWindow()
 
         if not self.register_dbus():
             QMessageBox.critical(None, "错误", "翻译服务已运行")
             sys.exit(1)
 
-        self.translation_requested.connect(self.window.show_translation)
+        self.translation_requested.connect(self.window.translate_widget.set_translation)
 
     def register_dbus(self):
         bus = QDBusConnection.sessionBus()
-        if not bus.registerService("com.destywen.translator"):
+        if not bus.registerService("com.destywen.helper"):
             print(f"注册服务失败: {bus.lastError().message()}")
             return False
 
-        adapter = TranslateAdapter(self)
+        adapter = WindowAdapter(self)
         if not bus.registerObject(
             "/",
-            "com.destywen.translator.Translate",
+            "com.destywen.helper.m",
             adapter,
             QDBusConnection.RegisterOption.ExportAllSlots,
         ):
             print(f"注册对象失败: {bus.lastError().message()}")
             return False
 
+        print("DBus注册成功，运行中...")
         return True
 
-    def handle_translation_request(self, text):
+    def handle_activate(self, page):
+        self.window.show_page(page)
+
+    def handle_translation(self, text):
+        self.window.show_page()
+        self.window.translate_widget.set_translation(dst="...")
         self.worker_thread = QThread()
         self.worker = TranslateWorker(text)
         self.worker.moveToThread(self.worker_thread)
@@ -209,7 +238,6 @@ class TranslatorApp(QApplication):
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
-
         self.worker_thread.start()
 
     def on_translation_done(self, result):
@@ -217,11 +245,15 @@ class TranslatorApp(QApplication):
             self.tray.showMessage(
                 "翻译失败", result["error"], QSystemTrayIcon.MessageIcon.Warning, 3000
             )
-            self.window.show_translation("错误", result["error"])
+            self.window.translate_widget.set_translation(dst=f"错误: {result['error']}")
         else:
             self.translation_requested.emit(result["src"], result["dst"])
 
 
 if __name__ == "__main__":
-    app = TranslatorApp(sys.argv)
+    app = MyApp(sys.argv)
+
+    with open("./style.qss", "r", encoding="utf-8") as f:
+        app.setStyleSheet(f.read())
+
     sys.exit(app.exec())
