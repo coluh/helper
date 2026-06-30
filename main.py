@@ -1,14 +1,14 @@
+import json
 import os
 import sys
-from typing import cast
+from typing import Literal, cast
 
-import requests
-from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl, Slot
 from PySide6.QtDBus import QDBusAbstractAdaptor, QDBusConnection
 from PySide6.QtGui import QAction, QIcon, QResizeEvent
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
-    QHBoxLayout,
     QLabel,
     QListView,
     QListWidget,
@@ -16,8 +16,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
-    QProgressBar,
-    QPushButton,
     QSplitter,
     QStackedWidget,
     QSystemTrayIcon,
@@ -28,73 +26,111 @@ from PySide6.QtWidgets import (
 DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY")
 
 
-class TranslateWorker(QObject):
-    finished = Signal(dict)
-
-    def __init__(self, text, source_lang="auto", target_lang="Chinese") -> None:
-        super().__init__()
-        self.text = text
-        self.source_lang = source_lang
-        self.target_lang = target_lang
-
-    def run(self):
-        try:
-            result = translate_text(self.text, self.source_lang, self.target_lang)
-            self.finished.emit(result)
-        except Exception as e:
-            self.finished.emit({"error": str(e)})
-
-
-def translate_text(text, source_lang, target_lang):
-    url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": "qwen-mt-flash",
-        "messages": [{"role": "user", "content": text}],
-        "translation_options": {"source_lang": source_lang, "target_lang": target_lang},
-    }
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if "choices" in data and len(data["choices"]) > 0:
-            translated = data["choices"][0]["message"]["content"]
-            return {"src": text, "dst": translated}
-        else:
-            error_msg = data.get("error", {}).get("message", "未知 API 错误")
-            return {"error": f"API 返回异常: {error_msg}"}
-    except requests.exceptions.RequestException as e:
-        return {"error": f"网络请求失败: {str(e)}"}
-
-
 class TranslateWidget(QWidget):
 
-    def __init__(self, parent=None):
+    def __init__(self, manager: QNetworkAccessManager, parent=None):
         super().__init__(parent)
+        self.manager = manager
 
         layout = QVBoxLayout(self)
 
-        self.src = QPlainTextEdit()
-        self.src.setPlaceholderText("待翻译文本...")
-        layout.addWidget(self.src)
+        self.src_edit = QPlainTextEdit()
+        self.src_edit.setPlaceholderText("待翻译文本...")
+        self.src_edit.textChanged.connect(self.on_text_changed)
+        layout.addWidget(self.src_edit)
 
-        self.dst = QPlainTextEdit()
-        self.dst.setPlaceholderText("翻译结果...")
-        self.dst.setReadOnly(True)
-        layout.addWidget(self.dst)
+        self.dst_text = QPlainTextEdit()
+        self.dst_text.setPlaceholderText("翻译结果...")
+        self.dst_text.setReadOnly(True)
+        layout.addWidget(self.dst_text)
+
+        self.debounce_timer = QTimer()
+        self.debounce_timer.setSingleShot(True)
+        self.debounce_timer.timeout.connect(self.start_translation)
+        self.debounce_delay = 400
+
+        self._wait_resp = False
+        self.current_reply = None
+
+    def on_text_changed(self):
+        self.debounce_timer.stop()
+        self.debounce_timer.start(self.debounce_delay)
+
+    def start_translation(self):
+        if self._wait_resp:
+            return
+        text = self.src_edit.toPlainText().strip()
+        if not text:
+            self.dst_text.clear()
+            return
+
+        self.set_translation(dst="...")
+        self.call_translation(text)
+
+    def call_translation(self, text, source_lang="auto", target_lang="Chinese"):
+        if self.current_reply and self.current_reply.isRunning():
+            self.current_reply.abort()
+            self.current_reply = None
+
+        url = QUrl("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
+        request = QNetworkRequest(url)
+        request.setRawHeader(b"Authorization", f"Bearer {DASHSCOPE_API_KEY}".encode())
+        request.setRawHeader(b"Content-Type", b"application/json")
+        payload = {
+            "model": "qwen-mt-flash",
+            "messages": [{"role": "user", "content": text}],
+            "translation_options": {"source_lang": source_lang, "target_lang": target_lang},
+        }
+        body = QByteArray(json.dumps(payload).encode())
+
+        reply = self.manager.post(request, body)
+        reply.setProperty("src_text", text)
+        self.current_reply = reply
+
+        def on_finished():
+            self._wait_resp = False
+            self.current_reply = None
+            if reply.error() == QNetworkReply.NetworkError.OperationCanceledError:
+                pass  # cancelled
+            elif reply.error() != QNetworkReply.NetworkError.NoError:
+                try:
+                    data = json.loads(reply.readAll().toStdString())
+                    self.on_translation_done({"error": data})
+                except Exception:
+                    self.on_translation_done({"error": reply.errorString()})
+            else:
+                try:
+                    data = json.loads(reply.readAll().toStdString())
+                    if "choices" in data and len(data["choices"]) > 0:
+                        content = data["choices"][0]["message"]["content"]
+                        self.on_translation_done({"dst": content})
+                    else:
+                        msg = data.get("error", {}).get("message", data)
+                        self.on_translation_done({"error": msg})
+                except Exception as e:
+                    self.on_translation_done({"error": str(e)})
+            reply.deleteLater()
+
+        reply.finished.connect(on_finished)
+
+    def on_translation_done(self, result):
+        if "error" in result:
+            self.dst_text.setPlainText(f"Error: {result['error']}")
+        else:
+            self.dst_text.setPlainText(result["dst"])
 
     def set_translation(self, src: str | None = None, dst: str | None = None):
         if src:
-            self.src.setPlainText(src)
+            self.src_edit.setPlainText(src)
         if dst:
-            self.dst.setPlainText(dst)
+            self.dst_text.setPlainText(dst)
 
 
 class MainWindow(QMainWindow):
 
-    def __init__(self):
+    def __init__(self, network_manager):
         super().__init__()
+        self.network_manager = network_manager
         self.setWindowTitle("Helper")
         self.setWindowFlags(
             # Qt.WindowType.FramelessWindowHint |
@@ -111,20 +147,29 @@ class MainWindow(QMainWindow):
         self.nav.setObjectName("nav")
         self.nav.addItems(["翻译", "设置"])
         self.nav.setFlow(QListView.Flow.LeftToRight)
+        for i in range(self.nav.count()):
+            item = self.nav.item(i)
+            if item:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.stack = QStackedWidget()
-        self.translate_widget = TranslateWidget(self)
+        self.translate_widget = TranslateWidget(self.network_manager, self)
         self.stack.addWidget(self.translate_widget)
         self.settings_widget = QLabel("settings page")
         self.stack.addWidget(self.settings_widget)
 
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
 
+        self.splitter = QSplitter()
+        self.splitter.addWidget(self.nav)
+        self.splitter.addWidget(self.stack)
+
+        self.root_layout.addWidget(self.splitter)
         self._apply_layout(self.size())
 
         self.nav.setCurrentRow(0)
 
-    def show_page(self, page="translate"):
+    def show_page(self, page: Literal["translation", "settings"] = "translation"):
         print(f"show page {page}")
         self.nav.setCurrentRow(0)
         self.show()
@@ -139,28 +184,16 @@ class MainWindow(QMainWindow):
     def _apply_layout(self, size: QSize):
         width, height = size.width(), size.height()
 
-        old_layout = self.root_layout
-        while old_layout.count():
-            old_layout.takeAt(0)
-
         if width < height:
+            self.splitter.setOrientation(Qt.Orientation.Vertical)
             self.nav.setFlow(QListView.Flow.LeftToRight)
             self.nav.setFixedWidth(16777215)
             self.nav.setFixedHeight(50)
-            self.root_layout.addWidget(self.nav)
-            self.root_layout.addWidget(self.stack)
         else:
+            self.splitter.setOrientation(Qt.Orientation.Horizontal)
             self.nav.setFlow(QListView.Flow.TopToBottom)
             self.nav.setFixedHeight(16777215)
             self.nav.setFixedWidth(100)
-            for i in range(self.nav.count()):
-                item = self.nav.item(i)
-                if item:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            splitter = QSplitter()
-            splitter.addWidget(self.nav)
-            splitter.addWidget(self.stack)
-            self.root_layout.addWidget(splitter)
 
 
 class WindowAdapter(QDBusAbstractAdaptor):
@@ -178,13 +211,17 @@ class WindowAdapter(QDBusAbstractAdaptor):
         if text and text.strip():
             parent.handle_translation(text.strip())
 
+    @Slot()
+    def Quit(self):
+        parent = cast("MyApp", self.parent())
+        parent.quit()
+
 
 class MyApp(QApplication):
 
-    translation_requested = Signal(str, str)
-
     def __init__(self, argv):
         super().__init__(argv)
+        self.network_manager = QNetworkAccessManager()
         self.setQuitOnLastWindowClosed(False)
 
         self.tray = QSystemTrayIcon(self)
@@ -196,13 +233,11 @@ class MyApp(QApplication):
         self.tray.setContextMenu(tray_menu)
         self.tray.show()
 
-        self.window = MainWindow()
+        self.window = MainWindow(self.network_manager)
 
         if not self.register_dbus():
             QMessageBox.critical(None, "错误", "翻译服务已运行")
             sys.exit(1)
-
-        self.translation_requested.connect(self.window.translate_widget.set_translation)
 
     def register_dbus(self):
         bus = QDBusConnection.sessionBus()
@@ -228,26 +263,9 @@ class MyApp(QApplication):
 
     def handle_translation(self, text):
         self.window.show_page()
-        self.window.translate_widget.set_translation(dst="...")
-        self.worker_thread = QThread()
-        self.worker = TranslateWorker(text)
-        self.worker.moveToThread(self.worker_thread)
-
-        self.worker_thread.started.connect(self.worker.run)
-        self.worker.finished.connect(self.on_translation_done)
-        self.worker.finished.connect(self.worker_thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
-        self.worker_thread.start()
-
-    def on_translation_done(self, result):
-        if "error" in result:
-            self.tray.showMessage(
-                "翻译失败", result["error"], QSystemTrayIcon.MessageIcon.Warning, 3000
-            )
-            self.window.translate_widget.set_translation(dst=f"错误: {result['error']}")
-        else:
-            self.translation_requested.emit(result["src"], result["dst"])
+        self.window.translate_widget._wait_resp = True
+        self.window.translate_widget.set_translation(text, "...")
+        self.window.translate_widget.call_translation(text)
 
 
 if __name__ == "__main__":
